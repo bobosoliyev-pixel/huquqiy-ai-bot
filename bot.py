@@ -2,17 +2,26 @@ import os
 import requests
 import telebot
 from telebot import types
+from dotenv import load_dotenv
+
+# .env fayldan sozlamalarni o'qish
+load_dotenv()
 
 # =========================
 # SOZLAMALAR
 # =========================
 
-BOT_TOKEN = os.getenv("8162119640:AAE8cd0GKNyXlTM1KK6Cm7VayjvC_dC6i5s")
-OPENAI_API_KEY = os.getenv("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")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 
-ADMIN_ID = 7180429594
+if not BOT_TOKEN or not OPENAI_API_KEY:
+    raise ValueError("❌ .env faylida BOT_TOKEN va OPENAI_API_KEY sozlanishi shart!")
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# User suhbatlari tarixini saqlash
+user_conversations = {}
 
 
 # =========================
@@ -21,6 +30,9 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 @bot.message_handler(commands=["start"])
 def start(message):
+    user_id = message.from_user.id
+    user_conversations[user_id] = []  # Suhbat tarixini boshlaymiz
+    
     keyboard = types.ReplyKeyboardMarkup(
         resize_keyboard=True
     )
@@ -36,7 +48,7 @@ def start(message):
         message.chat.id,
         f"Assalomu alaykum, {message.from_user.first_name}! 👋\n\n"
         "Men AI bilan ishlaydigan Telegram botman. 🤖\n\n"
-        "Kerakli bo‘limni tanlang:",
+        "Kerakli bo'limni tanlang:",
         reply_markup=keyboard
     )
 
@@ -63,7 +75,7 @@ def about(message):
     bot.send_message(
         message.chat.id,
         "🤖 Bu Telegram AI bot.\n\n"
-        "Bot sun’iy intellekt yordamida savollarga javob beradi.\n"
+        "Bot sun'iy intellekt yordamida savollarga javob beradi.\n"
         "Savolingizni oddiy qilib yozishingiz mumkin."
     )
 
@@ -76,7 +88,7 @@ def about(message):
 def admin(message):
     bot.send_message(
         message.chat.id,
-        "👨‍💻 Admin bilan bog‘lanish uchun:\n"
+        "👨‍💻 Admin bilan bog'lanish uchun:\n"
         "Telegram orqali murojaat qiling."
     )
 
@@ -90,7 +102,7 @@ def admin_command(message):
     if message.from_user.id != ADMIN_ID:
         bot.send_message(
             message.chat.id,
-            "❌ Sizda admin huquqi yo‘q."
+            "❌ Sizda admin huquqi yo'q."
         )
         return
 
@@ -102,12 +114,17 @@ def admin_command(message):
 
 
 # =========================
-# AI SO‘ROV
+# AI SO'ROV (CONTEXT BILAN)
 # =========================
 
-def ask_ai(question):
+def ask_ai(user_id, question):
+    """OpenAI APIga so'rov yuborish (suhbat tarixini saqlash bilan)"""
+    
     if not OPENAI_API_KEY:
         return "❌ OPENAI_API_KEY sozlanmagan."
+
+    if not question.strip():
+        return "⚠️ Iltimos, savolingizni to'liq yozing."
 
     url = "https://api.openai.com/v1/chat/completions"
 
@@ -116,22 +133,31 @@ def ask_ai(question):
         "Content-Type": "application/json"
     }
 
+    # Suhbat tarixini o'qish
+    if user_id not in user_conversations:
+        user_conversations[user_id] = []
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Sen foydalanuvchiga o'zbek tilida yordam beradigan "
+                "AI assistantsan. Javoblarni tushunarli, qisqa va foydali ber."
+            )
+        }
+    ]
+
+    # Oldingi suhbatlarni qo'shamiz
+    messages.extend(user_conversations[user_id])
+
+    # Yangi savolni qo'shamiz
+    messages.append({"role": "user", "content": question})
+
     data = {
         "model": "gpt-4o-mini",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Sen foydalanuvchiga o‘zbek tilida yordam beradigan "
-                    "AI assistantsan. Javoblarni tushunarli, qisqa va foydali ber."
-                )
-            },
-            {
-                "role": "user",
-                "content": question
-            }
-        ],
-        "temperature": 0.7
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 500
     }
 
     try:
@@ -143,14 +169,28 @@ def ask_ai(question):
         )
 
         if response.status_code != 200:
-            return "❌ AI bilan bog‘lanishda xatolik yuz berdi."
+            error_info = response.json().get("error", {})
+            return f"❌ Xatolik: {error_info.get('message', 'Noma\'lum xatolik')}"
 
         result = response.json()
+        answer = result["choices"][0]["message"]["content"]
 
-        return result["choices"][0]["message"]["content"]
+        # Suhbat tarixiga qo'shamiz
+        user_conversations[user_id].append({"role": "user", "content": question})
+        user_conversations[user_id].append({"role": "assistant", "content": answer})
 
-    except Exception:
-        return "❌ Xatolik yuz berdi. Keyinroq qayta urinib ko‘ring."
+        # Tarixni 10 ta oxirgi xabar bilan cheklash (tokenlarni tejash uchun)
+        if len(user_conversations[user_id]) > 20:
+            user_conversations[user_id] = user_conversations[user_id][-20:]
+
+        return answer
+
+    except requests.exceptions.Timeout:
+        return "⏱️ Vaqt tugadi. Keyinroq qayta urinib ko'ring."
+    except requests.exceptions.RequestException as e:
+        return f"❌ Xatolik: {str(e)}"
+    except Exception as e:
+        return f"❌ Noma'lum xatolik: {str(e)}"
 
 
 # =========================
@@ -168,12 +208,14 @@ def handle_text(message):
     ]:
         return
 
+    user_id = message.from_user.id
+    
     bot.send_chat_action(
         message.chat.id,
         "typing"
     )
 
-    answer = ask_ai(message.text)
+    answer = ask_ai(user_id, message.text)
 
     bot.send_message(
         message.chat.id,
@@ -187,7 +229,13 @@ def handle_text(message):
 
 if __name__ == "__main__":
     print("Bot ishga tushdi...")
+    print("✅ Bot tayyorlandi va buklashni kutmoqda...")
 
-    bot.infinity_polling(
-        skip_pending=True
-    )
+    try:
+        bot.infinity_polling(
+            skip_pending=True
+        )
+    except KeyboardInterrupt:
+        print("\n❌ Bot to'xtadi.")
+    except Exception as e:
+        print(f"❌ Xatolik: {e}")
